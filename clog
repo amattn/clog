@@ -1,0 +1,205 @@
+#!/bin/bash
+
+# ==============================================================================
+# SCRIPT: clog
+# 
+# USAGE INSTRUCTIONS:
+# To ensure the CLAUDE_CONFIG_DIR "sticks" to your current terminal session,
+# you MUST run this script using 'source' or '.':
+#
+#   source ./clog [optional_number_or_partial_name]
+#   OR
+#   . ./clog [optional_number_or_partial_name]
+#
+# PRO TIP: Add an alias to your ~/.bashrc or ~/.zshrc to run this easily:
+#   alias clog='source ~/path/to/clog'
+#
+# If you run it as './clog' without sourcing, the variable will vanish when 
+# the script ends.
+# ==============================================================================
+
+VERSION="1.0.1"
+
+# Helper to get absolute path cross-platform
+get_abs_path() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$1"
+    else
+        # Fallback for older macOS/BSD
+        echo "$(cd "$(dirname "$1")"; pwd)/$(basename "$1")"
+    fi
+}
+
+# 1. Handle command line flags (-v, -h, -u)
+case "$1" in
+    -v|--version)
+        echo "clog version $VERSION"
+        return 0 2>/dev/null || exit 0
+        ;;
+    -h|--help)
+        SCRIPT_PATH=$(get_abs_path "$0")
+        echo "=============================================================================="
+        echo "Script: clog"
+        echo ""
+        echo "Usage instructions:"
+        echo "To ensure the CLAUDE_CONFIG_DIR \"sticks\" to your current terminal session,"
+        echo "you MUST run this script using 'source' or '.':"
+        echo ""
+        echo "  source ./clog [optional_number_or_partial_name]"
+        echo "  OR"
+        echo "  . ./clog [optional_number_or_partial_name]"
+        echo ""
+        echo "Pro tip: Add an alias to your shell config to run this easily."
+        echo ""
+        echo "1. Manually add this line to your ~/.bashrc or ~/.zshrc:"
+        echo "   alias clog='source $SCRIPT_PATH'"
+        echo ""
+        echo "2. Or use these shortcut commands to add it automatically:"
+        echo "   For Zsh (typically macOS):"
+        echo "     echo \"alias clog='source $SCRIPT_PATH'\" >> ~/.zshrc && source ~/.zshrc"
+        echo ""
+        echo "   For Bash (typically Linux):"
+        echo "     echo \"alias clog='source $SCRIPT_PATH'\" >> ~/.bashrc && source ~/.bashrc"
+        echo ""
+        echo "If you run it as './clog' without sourcing, the variable will vanish when"
+        echo "the script ends."
+        echo "=============================================================================="
+        echo ""
+        echo "Options:"
+        echo "  [number]       Select a directory by its index in the list"
+        echo "  [suffix]       Partial/Case-insensitive match (e.g., 'wo' for .claude-work)"
+        echo "  -u, --unset    Clear the CLAUDE_CONFIG_DIR variable"
+        echo "  -v, --version  Show version information"
+        echo "  -h, --help     Show this help message"
+        echo ""
+        return 0 2>/dev/null || exit 0
+        ;;
+    -u|--unset)
+        unset CLAUDE_CONFIG_DIR
+        echo "🗑️  CLAUDE_CONFIG_DIR has been unset."
+        return 0 2>/dev/null || exit 0
+        ;;
+esac
+
+# 2. Detect if script was sourced; warn if not
+_clog_is_sourced=false
+if [ -n "$ZSH_EVAL_CONTEXT" ]; then
+    # zsh: contains ":file" when sourced
+    [[ "$ZSH_EVAL_CONTEXT" =~ :file$ ]] && _clog_is_sourced=true
+elif [ -n "$BASH_SOURCE" ]; then
+    # bash: BASH_SOURCE[0] differs from $0 when sourced
+    [[ "${BASH_SOURCE[0]}" != "$0" ]] && _clog_is_sourced=true
+fi
+
+if [ "$_clog_is_sourced" = false ]; then
+    echo "Note: clog is running in a subshell. CLAUDE_CONFIG_DIR will be set"
+    echo "      for this process only, not your terminal session."
+    echo "      To persist it, run:  source clog"
+    echo ""
+fi
+
+# 3. Check if the variable is already set
+
+if [ -n "$CLAUDE_CONFIG_DIR" ]; then
+    echo "✅ CLAUDE_CONFIG_DIR is already set to: $CLAUDE_CONFIG_DIR"
+    echo "   Run 'clog -u' or 'clog --unset' to clear it."
+else
+    # 4. Find directories matching the pattern ~/.claude-*
+    config_dirs=($(find ~ -maxdepth 1 -type d -name ".claude-*" 2>/dev/null))
+    num_options=${#config_dirs[@]}
+
+    # 5. Handle optional argument (number or partial name)
+    if [ -n "$1" ]; then
+        matched=false
+        if [[ "$1" =~ ^[0-9]+$ ]]; then
+            # Argument is a number
+            if [ "$1" -ge 1 ] && [ "$1" -le "$num_options" ]; then
+                export CLAUDE_CONFIG_DIR="${config_dirs[$(( $1 - 1 ))]}"
+                matched=true
+            fi
+        else
+            # Argument is a case-insensitive partial name match
+            matches=($(find ~ -maxdepth 1 -type d -iname ".claude-*$1*" 2>/dev/null))
+            
+            if [ ${#matches[@]} -eq 1 ]; then
+                export CLAUDE_CONFIG_DIR="${matches[0]}"
+                matched=true
+            elif [ ${#matches[@]} -gt 1 ]; then
+                echo "⚠️  Multiple matches found for '$1'. Please be more specific."
+                echo "Matches: ${matches[@]##*/}"
+                echo ""
+            fi
+        fi
+
+        # Alert if an argument was provided but no unique match was found
+        if [ "$matched" = false ] && [ ${#matches[@]} -eq 0 ]; then
+            echo "⚠️  Warning: '$1' is not a recognized index or config suffix."
+            echo ""
+        fi
+    fi
+
+    # 6. If no valid selection was made via argument, trigger interactive menu
+    if [ -z "$CLAUDE_CONFIG_DIR" ]; then
+        echo "🔍 CLAUDE_CONFIG_DIR is not set. Searching for available configs..."
+        echo "Please select a configuration directory:"
+        echo "0) Create a new config directory"
+
+        # Force vertical list
+        old_cols=$COLUMNS
+        COLUMNS=1
+        
+        PS3="Enter the number of your choice (or 'x' to cancel): "
+        
+        select opt in "${config_dirs[@]}" "Cancel and exit (x)"; do
+            # Handle '0' for Create new
+            if [[ "$REPLY" == "0" ]]; then
+                while true; do
+                    read -p "Enter a descriptive name (eg. personal, work, max, etc.) for the new config: " new_name
+                    if [ -n "$new_name" ]; then
+                        new_dir="$HOME/.claude-$new_name"
+                        mkdir -p "$new_dir"
+                        export CLAUDE_CONFIG_DIR="$new_dir"
+                        break 2 
+                    else
+                        echo "⚠️ Error: A name is required. Please try again."
+                    fi
+                done
+            fi
+
+            # Handle 'x' or 'exit' typed in prompt, or selecting the menu item
+            if [[ "$REPLY" == "x" || "$REPLY" == "exit" || "$opt" == "Cancel and exit (x)" ]]; then
+                echo "Exiting without setting variable."
+                COLUMNS=$old_cols
+                return 0 2>/dev/null || exit 0
+            fi
+
+            # Handle existing directory selection
+            case $opt in
+                ~/.claude-*)
+                    export CLAUDE_CONFIG_DIR="$opt"
+                    break
+                    ;;
+                *) 
+                    echo "Invalid option. Please try again."
+                    ;;
+            esac
+        done
+        COLUMNS=$old_cols
+    fi
+
+    # Final descriptive confirmation
+    echo "----------------------------------------------------------------"
+    echo "🚀 Environment updated!"
+    echo "Variable : CLAUDE_CONFIG_DIR"
+    echo "Value    : $CLAUDE_CONFIG_DIR"
+    if [ "$_clog_is_sourced" = true ]; then
+        echo "Status   : Active for this terminal session."
+    else
+        echo "Status   : Set in this subshell only (source clog to persist)."
+    fi
+    echo ""
+    echo "To verify or set this manually, run:"
+    echo "  echo \$CLAUDE_CONFIG_DIR"
+    echo "  export CLAUDE_CONFIG_DIR=\"$CLAUDE_CONFIG_DIR\""
+    echo "----------------------------------------------------------------"
+fi
